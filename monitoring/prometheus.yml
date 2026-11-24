@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: lab-web          # la app en produccion (metricas de seguridad)
+    static_configs:
+      - targets: ["lab-web-prod:5000"]
+
+  - job_name: cadvisor         # CPU, memoria y red de los contenedores
+    static_configs:
+      - targets: ["cadvisor:8080"]

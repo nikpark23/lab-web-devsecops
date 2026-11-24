@@ -1,6 +1,8 @@
 import os
+import re
 import secrets
 import sqlite3
+import threading
 
 from flask import Flask, abort, redirect, render_template_string, request, session
 from werkzeug.security import check_password_hash
@@ -29,6 +31,29 @@ app.config.update(
 
 DB = "vulnerable.db"
 MAX_BIO = 200
+
+# ---------------------------------------------------------------------------
+# MONITORIZACION: contadores de eventos de seguridad expuestos en /metrics
+# (formato Prometheus) para visualizarlos en Grafana.
+# ---------------------------------------------------------------------------
+EVENTOS = {
+    "login_ok": 0,
+    "login_fallido": 0,
+    "sqli_sospechoso": 0,
+    "xss_sospechoso": 0,
+    "csrf_bloqueado": 0,
+}
+_lock = threading.Lock()
+
+# Patrones simples de DETECCION (no bloquean: la defensa real son las consultas
+# parametrizadas y el autoescape; esto solo registra el intento como incidente).
+PATRON_SQLI = re.compile(r"('|--|;|/\*|\bunion\b|\bselect\b|\bor\b\s+\S+\s*=)", re.I)
+PATRON_XSS = re.compile(r"<\s*/?\s*(script|img|iframe|svg|body|a)\b|javascript:|on\w+\s*=", re.I)
+
+
+def registrar(tipo):
+    with _lock:
+        EVENTOS[tipo] += 1
 
 
 def db_query(query, params=()):
@@ -102,14 +127,20 @@ def login():
         user = request.form.get("username", "").strip()[:50]
         pw = request.form.get("password", "")[:128]
 
+        if PATRON_SQLI.search(user) or PATRON_SQLI.search(pw):
+            registrar("sqli_sospechoso")
+            app.logger.warning("INTENTO_SQLI user=%r ip=%s", user, request.remote_addr)
+
         rows = db_query("SELECT username, password FROM usuarios WHERE username = ?", (user,))
         if rows and check_password_hash(rows[0]["password"], pw):
             session.clear()
             session["user"] = rows[0]["username"]
             session["csrf_token"] = secrets.token_hex(16)
+            registrar("login_ok")
             app.logger.info("LOGIN_OK user=%r ip=%s", user, request.remote_addr)
             return redirect("/dashboard")
 
+        registrar("login_fallido")
         app.logger.warning("LOGIN_FALLIDO user=%r ip=%s", user, request.remote_addr)
         return render_template_string(LOGIN_HTML, error="Acceso denegado"), 401
 
@@ -140,10 +171,14 @@ def update_bio():
 
     # CORRECCION CSRF: se exige el token anti-CSRF
     if not csrf_valido():
+        registrar("csrf_bloqueado")
         app.logger.warning("CSRF_BLOQUEADO user=%r ip=%s", username, request.remote_addr)
         abort(403)
 
     nueva_bio = request.form.get("nueva_bio", "").strip()[:MAX_BIO]
+    if PATRON_XSS.search(nueva_bio):
+        registrar("xss_sospechoso")
+        app.logger.warning("INTENTO_XSS user=%r ip=%s", username, request.remote_addr)
     db_query("UPDATE usuarios SET bio = ? WHERE username = ?", (nueva_bio, username))
     return redirect("/dashboard")
 
@@ -151,9 +186,30 @@ def update_bio():
 @app.route("/logout", methods=["POST"])
 def logout():
     if not csrf_valido():
+        registrar("csrf_bloqueado")
+        app.logger.warning("CSRF_BLOQUEADO (logout) ip=%s", request.remote_addr)
         abort(403)
     session.clear()
     return redirect("/login")
+
+
+@app.route("/metrics")
+def metrics():
+    """Metricas en formato de texto Prometheus."""
+    lineas = [
+        "# HELP lab_incidentes_total Incidentes de seguridad detectados, por tipo.",
+        "# TYPE lab_incidentes_total counter",
+    ]
+    with _lock:
+        for tipo in ("login_fallido", "sqli_sospechoso", "xss_sospechoso", "csrf_bloqueado"):
+            lineas.append('lab_incidentes_total{tipo="%s"} %d' % (tipo, EVENTOS[tipo]))
+        lineas += [
+            "# HELP lab_login_ok_total Inicios de sesion exitosos.",
+            "# TYPE lab_login_ok_total counter",
+            "lab_login_ok_total %d" % EVENTOS["login_ok"],
+        ]
+    cuerpo = "\n".join(lineas) + "\n"
+    return cuerpo, 200, {"Content-Type": "text/plain; version=0.0.4; charset=utf-8"}
 
 
 @app.route("/")

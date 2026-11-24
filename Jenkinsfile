@@ -59,7 +59,8 @@ pipeline {
       steps {
         sh '''
           docker rm -f lab-web-prod || true
-          docker run -d --name lab-web-prod -p 5000:5000 --restart unless-stopped $IMAGE
+          docker network create $NET || true
+          docker run -d --name lab-web-prod --network $NET -p 5000:5000 --restart unless-stopped $IMAGE
         '''
       }
     }

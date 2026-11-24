@@ -1,0 +1,6 @@
+Monitorizacion con Prometheus + cAdvisor + Grafana
+1) Haber ejecutado el pipeline (crea la red lab-net y despliega lab-web-prod).
+2) docker rm -f grafana 2>/dev/null     (si creaste Grafana a mano antes)
+3) cd monitoring && docker-compose up -d
+4) Grafana: http://localhost:3000   (admin / admin)
+5) Generar incidentes: bash generar_incidentes.sh
